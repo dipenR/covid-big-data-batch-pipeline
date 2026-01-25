@@ -1,0 +1,7 @@
+aws:
+  region: "REPLACE_ME"
+  account_id: "REPLACE_ME"
+  
+s3:
+  raw_data_bucket: "REPLACE_WITH_BUCKET_NAME"
+  processed_data_bucket: "REPLACE_WITH_BUCKET_NAME"
