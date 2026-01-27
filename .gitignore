@@ -1,3 +1,5 @@
 # untracked files
 config.yaml
-.aws/
+data/covidvaccine.csv
+__pycache__
+**.backup

@@ -35,6 +35,8 @@ pip install -r requirements.txt
 
 ### Basic Usage
 
+Find data for this project from https://www.kaggle.com/datasets/kaushiksuresh147/covidvaccine-tweets?resource=download, download the zip and place the csv in the data folder.
+
 ```python
 from pretrained_twitter_model import analyze_csv_file
 
