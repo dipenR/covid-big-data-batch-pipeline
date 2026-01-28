@@ -10,10 +10,6 @@ from datetime import datetime
 from typing import Tuple, Dict, List, Any, Optional
 
 
-# ============================================================================
-# S3 Operations
-# ============================================================================
-
 def parse_s3_uri(s3_uri: str) -> Tuple[str, str]:
     """Parse S3 URI into bucket and key components."""
     if not s3_uri.startswith("s3://"):
@@ -53,10 +49,6 @@ def generate_s3_key(prefix: str = "covid_data") -> str:
     timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     return f"{prefix}/{timestamp}/data.json"
 
-
-# ============================================================================
-# Lambda Response Formatting
-# ============================================================================
 
 def build_success_response(data: Dict[str, Any], s3_location: str) -> Dict[str, Any]:
     """Build Lambda success response (HTTP 200)."""

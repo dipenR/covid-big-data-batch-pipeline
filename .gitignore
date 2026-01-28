@@ -3,3 +3,7 @@ config.yaml
 data/covidvaccine.csv
 __pycache__
 **.backup
+/terraform
+*.zip
+policies
+package

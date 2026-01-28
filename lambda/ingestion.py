@@ -1,21 +1,17 @@
 """
 Lambda handler for COVID data ingestion.
 
-Simplified POC version with inline data source handlers.
-Refactored from 289-line monolithic file to use reusable utilities.
+Uploads raw CSV files to S3 without parsing (parsing handled by Spark).
+Optimized for performance and Lambda resource limits.
 """
 
 import json
 import boto3
 import os
-import tempfile
+import traceback
 from kaggle.api.kaggle_api_extended import KaggleApi
 
-from common.csv_parser import parse_csv_file, parse_csv_string
-from common.aws_utils import (
-    parse_s3_uri, get_s3_csv_content, put_s3_object, generate_s3_key,
-    build_success_response, build_error_response, build_data_envelope
-)
+from aws_utils import parse_s3_uri
 
 s3_client = boto3.client("s3")
 
@@ -27,7 +23,10 @@ def get_env_variable(key: str, required: bool = False):
 
 
 def fetch_from_kaggle(dataset_identifier: str, specific_file: str = None):
-    """Fetch dataset from Kaggle."""
+    """Fetch dataset from Kaggle and return file path.
+
+    Returns dict with file_path for uploading raw CSV to S3.
+    """
     if not dataset_identifier:
         raise ValueError("kaggle_dataset parameter is required")
 
@@ -35,36 +34,39 @@ def fetch_from_kaggle(dataset_identifier: str, specific_file: str = None):
     api = KaggleApi()
     api.authenticate()
 
-    # Use temp directory for downloads
-    with tempfile.TemporaryDirectory() as temp_dir:
-        print(f"Downloading Kaggle dataset: {dataset_identifier}")
+    temp_dir = "/tmp/kaggle_data"
+    os.makedirs(temp_dir, exist_ok=True)
 
-        # Download and unzip dataset
-        api.dataset_download_files(dataset_identifier, path=temp_dir, unzip=True)
+    print(f"Downloading Kaggle dataset: {dataset_identifier}")
 
-        # Find CSV files
-        csv_files = [f for f in os.listdir(temp_dir) if f.endswith('.csv')]
-        if not csv_files:
-            raise ValueError("No CSV files found in Kaggle dataset")
+    # Download and unzip dataset
+    api.dataset_download_files(dataset_identifier, path=temp_dir, unzip=True)
 
-        # Use specific file or first CSV
-        target_file = specific_file if specific_file in csv_files else csv_files[0]
-        file_path = os.path.join(temp_dir, target_file)
+    # Find CSV files
+    csv_files = [f for f in os.listdir(temp_dir) if f.endswith('.csv')]
+    if not csv_files:
+        raise ValueError("No CSV files found in Kaggle dataset")
 
-        # Parse CSV
-        with open(file_path, 'r', encoding='utf-8') as csvfile:
-            records = parse_csv_file(csvfile)
+    # Use specific file or first CSV
+    target_file = specific_file if specific_file in csv_files else csv_files[0]
+    file_path = os.path.join(temp_dir, target_file)
 
-        # Return data envelope
-        return build_data_envelope(
-            source="kaggle",
-            records=records,
-            metadata={"dataset": dataset_identifier, "file": target_file}
-        )
+    print(f"Downloaded CSV: {target_file} ({os.path.getsize(file_path) / 1024 / 1024:.2f} MB)")
+
+    # Return file path instead of parsing - let Spark handle parsing
+    return {
+        "file_path": file_path,
+        "file_name": target_file,
+        "source": "kaggle",
+        "metadata": {
+            "dataset": dataset_identifier,
+            "file_size_mb": os.path.getsize(file_path) / 1024 / 1024
+        }
+    }
 
 
 def fetch_from_local(file_path: str):
-    """Read CSV file from local file system."""
+    """Read CSV file from local file system and return file path."""
     # Resolve relative paths from project root
     if not os.path.isabs(file_path):
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -73,38 +75,47 @@ def fetch_from_local(file_path: str):
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"CSV file not found at {file_path}")
 
-    # Parse CSV
-    with open(file_path, 'r', encoding='utf-8') as csvfile:
-        records = parse_csv_file(csvfile)
+    print(f"Using local CSV: {file_path} ({os.path.getsize(file_path) / 1024 / 1024:.2f} MB)")
 
-    # Return data envelope
-    return build_data_envelope(
-        source="test_data",
-        records=records,
-        metadata={"dataset": os.path.basename(file_path).replace('.csv', '')}
-    )
+    # Return file path instead of parsing
+    return {
+        "file_path": file_path,
+        "file_name": os.path.basename(file_path),
+        "source": "test_local",
+        "metadata": {
+            "dataset": os.path.basename(file_path).replace('.csv', ''),
+            "file_size_mb": os.path.getsize(file_path) / 1024 / 1024
+        }
+    }
 
 
 def fetch_from_s3(s3_uri: str):
-    """Read CSV file from S3."""
+    """Download CSV file from S3 to local temp and return file path."""
     bucket, key = parse_s3_uri(s3_uri)
-    print(f"Fetching from S3: bucket={bucket}, key={key}")
+    print(f"Downloading from S3: bucket={bucket}, key={key}")
 
-    # Download and parse CSV
-    csv_content = get_s3_csv_content(bucket, key, s3_client)
-    records = parse_csv_string(csv_content)
+    # Download to /tmp
+    local_path = f"/tmp/{os.path.basename(key)}"
+    s3_client.download_file(bucket, key, local_path)
 
-    # Return data envelope
-    return build_data_envelope(
-        source="test_data_s3",
-        records=records,
-        metadata={"dataset": os.path.basename(key).replace('.csv', '')}
-    )
+    print(f"Downloaded CSV: {os.path.basename(key)} ({os.path.getsize(local_path) / 1024 / 1024:.2f} MB)")
+
+    # Return file path instead of parsing
+    return {
+        "file_path": local_path,
+        "file_name": os.path.basename(key),
+        "source": "test_s3",
+        "metadata": {
+            "dataset": os.path.basename(key).replace('.csv', ''),
+            "file_size_mb": os.path.getsize(local_path) / 1024 / 1024,
+            "s3_uri": s3_uri
+        }
+    }
 
 
 def lambda_handler(event, context=None):
     """
-    Orchestrates data ingestion from various sources.
+    Orchestrates data ingestion from various sources and uploads raw CSV to S3.
 
     Args:
         event: Lambda event dict containing:
@@ -133,7 +144,7 @@ def lambda_handler(event, context=None):
             )
 
         elif source_type == "kaggle":
-            data = fetch_from_kaggle(
+            file_info = fetch_from_kaggle(
                 dataset_identifier=event.get("kaggle_dataset"),
                 specific_file=event.get("kaggle_file")
             )
@@ -143,22 +154,44 @@ def lambda_handler(event, context=None):
             file_path = event.get("test_data_location", "data/covidvaccine.csv")
 
             if file_path.startswith("s3://"):
-                data = fetch_from_s3(s3_uri=file_path)
+                file_info = fetch_from_s3(s3_uri=file_path)
             else:
-                data = fetch_from_local(file_path=file_path)
+                file_info = fetch_from_local(file_path=file_path)
 
-        # Store fetched data to S3
+        # Upload raw CSV file to S3 (not JSON!)
         bucket = get_env_variable('RAW_DATA_BUCKET', required=True)
-        key = generate_s3_key()
-        put_s3_object(bucket, key, json.dumps(data), s3_client)
+        s3_key = f"raw/{file_info['file_name']}"
 
-        # Build and return success response
-        s3_location = f"s3://{bucket}/{key}"
-        return build_success_response(data, s3_location)
+        print(f"Uploading to S3: s3://{bucket}/{s3_key}")
+        s3_client.upload_file(file_info['file_path'], bucket, s3_key)
+
+        # Build success response
+        s3_location = f"s3://{bucket}/{s3_key}"
+        response_body = {
+            "message": "Data ingestion successful",
+            "s3_location": s3_location,
+            "source": file_info['source'],
+            "file_name": file_info['file_name'],
+            "file_size_mb": file_info['metadata']['file_size_mb'],
+            "metadata": file_info['metadata']
+        }
+
+        print(f"Upload complete: {s3_location}")
+        return {
+            "statusCode": 200,
+            "body": json.dumps(response_body)
+        }
 
     except Exception as e:
         print(f"Error: {str(e)}")
-        return build_error_response(e)
+        traceback.print_exc()
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "error": str(e),
+                "error_type": type(e).__name__
+            })
+        }
 
 
 if __name__ == "__main__":
